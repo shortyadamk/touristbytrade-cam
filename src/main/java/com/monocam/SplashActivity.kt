@@ -1,10 +1,8 @@
 package com.monocam
 
 import android.content.Intent
-import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.os.Bundle
-import android.util.Base64
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -28,11 +26,7 @@ class SplashActivity : ComponentActivity() {
         root.setBackgroundColor(Color.BLACK)
 
         val img = ImageView(this)
-        try {
-            val bytes = Base64.decode(LogoData.PNG, Base64.DEFAULT)
-            img.setImageBitmap(BitmapFactory.decodeByteArray(bytes, 0, bytes.size))
-        } catch (e: Exception) {
-        }
+        img.setImageResource(R.drawable.splash_logo)
         img.adjustViewBounds = true
         img.scaleType = ImageView.ScaleType.FIT_CENTER
         img.alpha = 0f
