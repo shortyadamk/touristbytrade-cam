@@ -96,8 +96,8 @@ private const val MAX_PENDING = 8
 // true = best image quality (slightly slower capture), false = fastest capture
 private const val CAPTURE_MAX_QUALITY = true
 
-// height of the slide-out settings area (tabs 46dp + sliders 190dp)
-private const val SETTINGS_DP = 236
+// height of the slide-out settings area (tabs 46dp + sliders 230dp)
+private const val SETTINGS_DP = 276
 
 private val TEAL = Color.parseColor("#3FA79D")
 private val GRAY = Color.parseColor("#3A3A3A")
@@ -172,6 +172,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var prefs: SharedPreferences
     private lateinit var previewView: PreviewView
     private lateinit var grainView: GrainView
+    private lateinit var levelView: LevelView
     private lateinit var thumb: ImageView
     private lateinit var thumbDim: View
     private lateinit var thumbSpinner: ProgressBar
@@ -200,6 +201,9 @@ class MainActivity : ComponentActivity() {
 
     private var settingsOpen = false
     private var settingsAnim: ValueAnimator? = null
+
+    // level overlay on the viewfinder (off by default)
+    private var levelOn = false
 
     // Google's HDR / Night processing (camera extensions): 0 = standard, 1 = HDR, 2 = Night
     private var extMgr: ExtensionsManager? = null
@@ -322,6 +326,7 @@ class MainActivity : ComponentActivity() {
         lens = prefs.getInt("lens", CameraSelector.LENS_FACING_BACK)
         extMode = prefs.getInt("ext", 0).coerceIn(0, 2)
         settingsOpen = prefs.getBoolean("settingsOpen", false)
+        levelOn = prefs.getBoolean("level", false)
 
         // follow the phone's physical orientation so landscape shots are saved upright
         orient = object : OrientationEventListener(this) {
@@ -345,6 +350,8 @@ class MainActivity : ComponentActivity() {
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
         grainView = GrainView(this)
+        levelView = LevelView(this)
+        levelView.setOn(levelOn)
 
         lensRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -386,6 +393,7 @@ class MainActivity : ComponentActivity() {
             setBackgroundColor(Color.BLACK)
             addView(previewView, MATCH, MATCH)
             addView(grainView, MATCH, MATCH)
+            addView(levelView, MATCH, MATCH)
             addView(flash, MATCH, MATCH)
             addView(ring, dp(64), dp(64))
             addView(zoomLabel, FrameLayout.LayoutParams(WRAP, WRAP).apply {
@@ -409,6 +417,42 @@ class MainActivity : ComponentActivity() {
             { (it.gr * 100f).roundToInt().coerceIn(0, 100) }) { s, p -> s.gr = p / 100f }
         addRow("gs", 30, { "Grain size %.1f".format(1f + it / 10f) },
             { ((it.gs - 1f) * 10f).roundToInt().coerceIn(0, 30) }) { s, p -> s.gs = 1f + p / 10f }
+
+        // level overlay on/off (last row of the adjust list, shown in both modes)
+        val levelLabel = TextView(this).apply {
+            text = "Level overlay"
+            setTextColor(Color.WHITE)
+            textSize = 13f
+        }
+        val levelBtn = Button(this).apply {
+            isAllCaps = false
+            textSize = 11f
+            minWidth = 0
+            minimumWidth = 0
+            minHeight = 0
+            minimumHeight = 0
+            setPadding(0, 0, 0, 0)
+        }
+        fun showLevelBtn() {
+            levelBtn.text = if (levelOn) "On" else "Off"
+            styleBtn(levelBtn, levelOn)
+        }
+        levelBtn.setOnClickListener {
+            levelOn = !levelOn
+            levelView.setOn(levelOn)
+            prefs.edit().putBoolean("level", levelOn).apply()
+            showLevelBtn()
+        }
+        showLevelBtn()
+        val levelRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        levelRow.addView(levelLabel, LinearLayout.LayoutParams(dp(135), WRAP))
+        levelRow.addView(levelBtn, LinearLayout.LayoutParams(dp(72), dp(32)))
+        val lrp = LinearLayout.LayoutParams(MATCH, WRAP)
+        lrp.topMargin = dp(4)
+        adjustView.addView(levelRow, lrp)
 
         // ----- presets tab -----
         presetView = LinearLayout(this).apply {
@@ -492,7 +536,7 @@ class MainActivity : ComponentActivity() {
         settings = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(tabs, LinearLayout.LayoutParams(MATCH, dp(46)))
-            addView(scroll, LinearLayout.LayoutParams(MATCH, dp(190)))
+            addView(scroll, LinearLayout.LayoutParams(MATCH, dp(230)))
         }
 
         // slim bar that opens and closes the settings area
