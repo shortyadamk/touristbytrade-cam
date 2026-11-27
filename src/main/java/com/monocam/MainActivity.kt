@@ -816,6 +816,17 @@ class MainActivity : ComponentActivity() {
         col.addView(topBar, LinearLayout.LayoutParams(MATCH, dp(56)))
         col.addView(View(this), LinearLayout.LayoutParams(MATCH, 0, 1f))
 
+        // logo above the title: the white logo image, turned black
+        val logo = ImageView(this)
+        logo.setImageResource(R.drawable.splash_logo)
+        logo.imageTintList = ColorStateList.valueOf(Color.BLACK)
+        logo.adjustViewBounds = true
+        logo.scaleType = ImageView.ScaleType.FIT_CENTER
+        val llp = LinearLayout.LayoutParams(dp(200), WRAP)
+        llp.gravity = Gravity.CENTER_HORIZONTAL
+        llp.bottomMargin = dp(10)
+        col.addView(logo, llp)
+
         // title
         val title = TextView(this)
         title.text = "Search"
