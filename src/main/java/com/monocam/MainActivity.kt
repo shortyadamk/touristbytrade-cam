@@ -22,6 +22,7 @@ import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Shader
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
@@ -30,6 +31,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
 import android.text.InputFilter
+import android.text.InputType
 import android.util.Size
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
@@ -40,6 +42,8 @@ import android.view.Surface
 import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -51,6 +55,7 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -170,6 +175,7 @@ private fun uprightMatrix(bytes: ByteArray, fallbackRot: Int): Matrix {
 class MainActivity : ComponentActivity() {
 
     private lateinit var prefs: SharedPreferences
+    private lateinit var mainRoot: LinearLayout
     private lateinit var previewView: PreviewView
     private lateinit var grainView: GrainView
     private lateinit var levelView: LevelView
@@ -192,6 +198,21 @@ class MainActivity : ComponentActivity() {
     private lateinit var settings: LinearLayout
     private lateinit var handle: TextView
     private lateinit var orient: OrientationEventListener
+
+    // stealth mode: a fake search page with a small shutter viewfinder at the bottom
+    private lateinit var stealthPage: FrameLayout
+    private lateinit var stealthFrame: FrameLayout
+    private lateinit var stealthPreview: PreviewView
+    private var stealth = false
+    private val backCb = object : OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() {
+            // back never leaves stealth; it only closes the keyboard
+            stealthPage.findFocus()?.let {
+                it.clearFocus()
+                hideKeyboard(it)
+            }
+        }
+    }
 
     private var camera: Camera? = null
     private var imageCapture: ImageCapture? = null
@@ -285,7 +306,21 @@ class MainActivity : ComponentActivity() {
         }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
-    private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
+
+    // in stealth mode nothing pops up on screen; problems are signalled by a double vibration
+    private fun toast(t: String) {
+        if (stealth) {
+            failBuzz()
+            return
+        }
+        Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun failBuzz() {
+        val v = stealthFrame
+        v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        v.postDelayed({ v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS) }, 180)
+    }
 
     private fun styleBtn(b: Button, on: Boolean) {
         b.background = GradientDrawable().apply {
@@ -376,7 +411,7 @@ class MainActivity : ComponentActivity() {
             alpha = 0f
         }
 
-        // HDR / Night button (lives in the right-hand button column, not on the image)
+        // Std / HDR / Night / Stealth button (lives in the right-hand button column)
         extBtn = Button(this).apply {
             isAllCaps = false
             textSize = 11f
@@ -589,7 +624,7 @@ class MainActivity : ComponentActivity() {
             setOnClickListener { shoot() }
         }
 
-        // right-hand column, top to bottom: B&W/Color, Std/HDR/Night, Flip
+        // right-hand column, top to bottom: B&W/Color, Std/HDR/Night/Stealth, Flip
         modeBtn = Button(this).apply {
             isAllCaps = false
             textSize = 11f
@@ -661,7 +696,17 @@ class MainActivity : ComponentActivity() {
             v.setPadding(b.left, b.top, b.right, b.bottom)
             insets
         }
-        setContentView(root)
+        mainRoot = root
+
+        // the stealth page sits on top of the normal screen and stays hidden until needed
+        val sp = buildStealthPage()
+        stealthPage = sp
+        val top = FrameLayout(this).apply {
+            addView(root, MATCH, MATCH)
+            addView(sp, MATCH, MATCH)
+        }
+        setContentView(top)
+        onBackPressedDispatcher.addCallback(this, backCb)
 
         setMode(mode)
 
@@ -690,6 +735,209 @@ class MainActivity : ComponentActivity() {
             .putInt("ext", extMode)
             .putBoolean("settingsOpen", settingsOpen)
             .apply()
+    }
+
+    // ---------- stealth mode ----------
+
+    private fun hideKeyboard(v: View) {
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        imm.hideSoftInputFromWindow(v.windowToken, 0)
+    }
+
+    private fun setBarsLight(light: Boolean) {
+        val c = if (light) Color.WHITE else Color.BLACK
+        window.statusBarColor = c
+        window.navigationBarColor = c
+        val ic = WindowCompat.getInsetsController(window, window.decorView)
+        ic.isAppearanceLightStatusBars = light
+        ic.isAppearanceLightNavigationBars = light
+    }
+
+    private fun enterStealth() {
+        if (stealth) return
+        stealth = true
+        levelView.setOn(false)
+        mainRoot.visibility = View.INVISIBLE
+        stealthPage.visibility = View.VISIBLE
+        stealthPage.requestFocus()
+        setBarsLight(true)
+        backCb.isEnabled = true
+        bindCamera()
+    }
+
+    // "Exit" on the fake page: back to the normal screen in standard mode
+    private fun exitStealth() {
+        if (!stealth) return
+        stealthPage.findFocus()?.let { hideKeyboard(it) }
+        stealth = false
+        backCb.isEnabled = false
+        stealthPage.visibility = View.GONE
+        mainRoot.visibility = View.VISIBLE
+        setBarsLight(false)
+        levelView.setOn(levelOn)
+        extMode = 0
+        bindCamera()
+        refreshThumb()
+    }
+
+    // a generic search-engine style page; the small viewfinder at the bottom is also the shutter
+    private fun buildStealthPage(): FrameLayout {
+        val dark = Color.parseColor("#202124")
+        val grey = Color.parseColor("#5f6368")
+        val line = Color.parseColor("#dfe1e5")
+
+        val page = FrameLayout(this)
+        page.setBackgroundColor(Color.WHITE)
+        page.isFocusableInTouchMode = true
+        page.visibility = View.GONE
+
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        page.addView(col, MATCH, MATCH)
+
+        fun link(t: String, click: (() -> Unit)?): TextView {
+            val tv = TextView(this)
+            tv.text = t
+            tv.textSize = 14f
+            tv.setTextColor(dark)
+            tv.setPadding(dp(12), dp(14), dp(12), dp(14))
+            if (click != null) tv.setOnClickListener { click() }
+            return tv
+        }
+
+        // top links (the last one is the exit button)
+        val topBar = LinearLayout(this)
+        topBar.orientation = LinearLayout.HORIZONTAL
+        topBar.gravity = Gravity.END or Gravity.CENTER_VERTICAL
+        topBar.setPadding(dp(8), 0, dp(8), 0)
+        topBar.addView(link("Mail", null))
+        topBar.addView(link("Images", null))
+        topBar.addView(link("Exit") { exitStealth() })
+        col.addView(topBar, LinearLayout.LayoutParams(MATCH, dp(56)))
+        col.addView(View(this), LinearLayout.LayoutParams(MATCH, 0, 1f))
+
+        // title
+        val title = TextView(this)
+        title.text = "Search"
+        title.textSize = 48f
+        title.setTextColor(Color.parseColor("#3c4043"))
+        title.gravity = Gravity.CENTER
+        title.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        col.addView(title, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        // search box
+        val field = LinearLayout(this)
+        field.orientation = LinearLayout.HORIZONTAL
+        field.gravity = Gravity.CENTER_VERTICAL
+        field.setPadding(dp(16), 0, dp(12), 0)
+        field.background = GradientDrawable().apply {
+            cornerRadius = dp(26).toFloat()
+            setColor(Color.WHITE)
+            setStroke(dp(1), line)
+        }
+        val glass = ImageView(this)
+        glass.setImageResource(android.R.drawable.ic_menu_search)
+        glass.imageTintList = ColorStateList.valueOf(Color.parseColor("#9aa0a6"))
+        field.addView(glass, LinearLayout.LayoutParams(dp(22), dp(22)))
+        val input = EditText(this)
+        input.hint = "Search the web"
+        input.setHintTextColor(Color.parseColor("#80868b"))
+        input.setTextColor(dark)
+        input.textSize = 16f
+        input.background = null
+        input.isSingleLine = true
+        input.inputType = InputType.TYPE_CLASS_TEXT
+        input.imeOptions = EditorInfo.IME_ACTION_SEARCH
+        input.setPadding(dp(12), 0, 0, 0)
+        input.setOnEditorActionListener { v, _, _ ->
+            v.clearFocus()
+            hideKeyboard(v)
+            true
+        }
+        field.addView(input, LinearLayout.LayoutParams(0, MATCH, 1f))
+        val flp = LinearLayout.LayoutParams(MATCH, dp(52))
+        flp.setMargins(dp(24), dp(28), dp(24), 0)
+        col.addView(field, flp)
+
+        // two plain buttons
+        fun soft(t: String): TextView {
+            val tv = TextView(this)
+            tv.text = t
+            tv.textSize = 14f
+            tv.setTextColor(Color.parseColor("#3c4043"))
+            tv.gravity = Gravity.CENTER
+            tv.setPadding(dp(16), dp(10), dp(16), dp(10))
+            tv.background = GradientDrawable().apply {
+                cornerRadius = dp(4).toFloat()
+                setColor(Color.parseColor("#f8f9fa"))
+                setStroke(dp(1), Color.parseColor("#f8f9fa"))
+            }
+            return tv
+        }
+        val btnRow = LinearLayout(this)
+        btnRow.orientation = LinearLayout.HORIZONTAL
+        btnRow.gravity = Gravity.CENTER
+        val bl = LinearLayout.LayoutParams(WRAP, WRAP)
+        bl.setMargins(dp(6), 0, dp(6), 0)
+        btnRow.addView(soft("Search"), bl)
+        val bl2 = LinearLayout.LayoutParams(WRAP, WRAP)
+        bl2.setMargins(dp(6), 0, dp(6), 0)
+        btnRow.addView(soft("Browse"), bl2)
+        val brp = LinearLayout.LayoutParams(MATCH, WRAP)
+        brp.topMargin = dp(24)
+        col.addView(btnRow, brp)
+
+        // shortcut chips
+        val chips = LinearLayout(this)
+        chips.orientation = LinearLayout.HORIZONTAL
+        chips.gravity = Gravity.CENTER
+        for (t in arrayOf("News", "Weather", "Maps", "Sports")) {
+            val tv = TextView(this)
+            tv.text = t
+            tv.textSize = 13f
+            tv.setTextColor(grey)
+            tv.setPadding(dp(14), dp(8), dp(14), dp(8))
+            tv.background = GradientDrawable().apply {
+                cornerRadius = dp(18).toFloat()
+                setColor(Color.parseColor("#f1f3f4"))
+            }
+            val clp = LinearLayout.LayoutParams(WRAP, WRAP)
+            clp.setMargins(dp(5), 0, dp(5), 0)
+            chips.addView(tv, clp)
+        }
+        val cp = LinearLayout.LayoutParams(MATCH, WRAP)
+        cp.topMargin = dp(32)
+        col.addView(chips, cp)
+        col.addView(View(this), LinearLayout.LayoutParams(MATCH, 0, 1f))
+
+        // small live viewfinder in the exact shape of the photo (3:4); tapping it takes the picture
+        stealthPreview = PreviewView(this).apply {
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+            scaleType = PreviewView.ScaleType.FILL_CENTER
+            isClickable = false
+            isFocusable = false
+        }
+        val frameBorder = View(this)
+        frameBorder.background = GradientDrawable().apply {
+            setColor(Color.TRANSPARENT)
+            setStroke(dp(2), Color.parseColor("#9aa0a6"))
+        }
+        stealthFrame = FrameLayout(this)
+        stealthFrame.addView(stealthPreview, MATCH, MATCH)
+        stealthFrame.addView(frameBorder, MATCH, MATCH)
+        stealthFrame.isSoundEffectsEnabled = false
+        stealthFrame.setOnClickListener { shoot() }
+        val vlp = LinearLayout.LayoutParams(dp(120), dp(160))
+        vlp.gravity = Gravity.CENTER_HORIZONTAL
+        vlp.bottomMargin = dp(20)
+        col.addView(stealthFrame, vlp)
+
+        ViewCompat.setOnApplyWindowInsetsListener(page) { v, insets ->
+            val b = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            v.setPadding(b.left, b.top, b.right, b.bottom)
+            insets
+        }
+        return page
     }
 
     // ---------- slide-out settings ----------
@@ -728,12 +976,11 @@ class MainActivity : ComponentActivity() {
         a.start()
     }
 
-    // ---------- HDR / Night (camera extensions) ----------
+    // ---------- Std / HDR / Night / Stealth ----------
 
     private fun styleExt() {
-        val avail = extAvail.size > 1
         extBtn.text = extNames[extActive]
-        extBtn.alpha = if (avail) 1f else 0.55f
+        extBtn.alpha = 1f
         extBtn.background = GradientDrawable().apply {
             cornerRadius = dp(8).toFloat()
             setColor(if (extActive != 0) TEAL else GRAY)
@@ -741,13 +988,17 @@ class MainActivity : ComponentActivity() {
         extBtn.setTextColor(Color.WHITE)
     }
 
+    // order: Std, HDR, Night (when the phone offers them), then Stealth, then back to Std
     private fun cycleExt() {
-        if (extAvail.size <= 1) {
-            toast("This phone doesn't offer HDR or Night to other apps")
+        val order = ArrayList<Int>(extAvail)
+        order.add(3)
+        val i = order.indexOf(extActive)
+        val next = order[(i + 1) % order.size]
+        if (next == 3) {
+            enterStealth()
             return
         }
-        val i = extAvail.indexOf(extActive)
-        extMode = extAvail[(i + 1) % extAvail.size]
+        extMode = next
         if (extMode == 2) toast("Night: hold still, shots take a few seconds")
         bindCamera()
     }
@@ -1153,11 +1404,22 @@ class MainActivity : ComponentActivity() {
 
         val base = CameraSelector.Builder().requireLensFacing(lens).build()
         extAvail = availableExt(base)
-        extActive = if (extMode in extAvail) extMode else 0
+        // stealth always uses standard capture
+        extActive = if (!stealth && extMode in extAvail) extMode else 0
         styleExt()
         val activeName = extNames[extActive]
 
-        val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+        // the preview goes to the small stealth viewfinder while stealth mode is on
+        val pb = Preview.Builder()
+        if (stealth) {
+            pb.setResolutionSelector(
+                ResolutionSelector.Builder()
+                    .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+                    .build()
+            )
+        }
+        val preview = pb.build()
+        preview.setSurfaceProvider((if (stealth) stealthPreview else previewView).surfaceProvider)
 
         val ic: ImageCapture
         val selector: CameraSelector
@@ -1194,7 +1456,10 @@ class MainActivity : ComponentActivity() {
             previewView.postDelayed({ applyFilter() }, 500)
             previewView.postDelayed({ applyFilter() }, 1500)
         } catch (e: Exception) {
-            if (extActive != 0) {
+            if (stealth) {
+                exitStealth()
+                toast("Couldn't start stealth mode: ${e.message}")
+            } else if (extActive != 0) {
                 extMode = 0
                 toast("Couldn't start $activeName mode, using standard")
                 bindCamera()
@@ -1218,14 +1483,15 @@ class MainActivity : ComponentActivity() {
     private fun lookPaint(ct: Float, sat: Float, warm: Float): Paint =
         Paint().apply { colorFilter = ColorMatrixColorFilter(colorMatrix(ct, sat, warm)) }
 
-    // color or black and white look for the live preview.
+    // color or black and white look for the live preview (main viewfinder or the stealth one).
     // The filter lives on the PreviewView only; any paint left on the inner TextureView is cleared,
     // so an old black and white filter can never override the color one.
     private fun applyFilter() {
         val s = cur()
         val paint = if (mode == 1) lookPaint(s.ct, s.sat, s.warm) else lookPaint(s.ct, 0f, 0f)
-        findTexture(previewView)?.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-        previewView.setLayerType(View.LAYER_TYPE_HARDWARE, paint)
+        val pvw = if (stealth) stealthPreview else previewView
+        findTexture(pvw)?.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        pvw.setLayerType(View.LAYER_TYPE_HARDWARE, paint)
     }
 
     private fun findTexture(v: View): TextureView? {
@@ -1256,15 +1522,24 @@ class MainActivity : ComponentActivity() {
             s.gr, s.gs
         )
 
-        // instant feedback: vibration, shutter blink, button squish
-        shutterBtn.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-        flash.animate().cancel()
-        flash.alpha = 0.9f
-        flash.animate().alpha(0f).setDuration(200).start()
-        shutterBtn.animate().cancel()
-        shutterBtn.animate().scaleX(0.9f).scaleY(0.9f).setDuration(60).withEndAction {
-            shutterBtn.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
-        }.start()
+        if (stealth) {
+            // quiet feedback: a vibration and a tiny press on the small viewfinder, nothing else
+            stealthFrame.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            stealthFrame.animate().cancel()
+            stealthFrame.animate().scaleX(0.95f).scaleY(0.95f).setDuration(50).withEndAction {
+                stealthFrame.animate().scaleX(1f).scaleY(1f).setDuration(110).start()
+            }.start()
+        } else {
+            // instant feedback: vibration, shutter blink, button squish
+            shutterBtn.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            flash.animate().cancel()
+            flash.alpha = 0.9f
+            flash.animate().alpha(0f).setDuration(200).start()
+            shutterBtn.animate().cancel()
+            shutterBtn.animate().scaleX(0.9f).scaleY(0.9f).setDuration(60).withEndAction {
+                shutterBtn.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
+            }.start()
+        }
 
         ic.takePicture(worker, object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureSuccess(image: ImageProxy) {
